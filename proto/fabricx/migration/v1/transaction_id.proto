@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package fabricx.migration.v1;
+
+option go_package = "github.com/syndbg/fabric-x-migrate-poc/pkg/genesisdata";
+
+// TODO(schema-ownership): Move this schema to hyperledger/fabric-x-common once
+// maintainers accept the format. The exporter and committer must share one
+// generated package; neither repository should carry an independent copy.
+
+// TransactionIDRecord preserves a source transaction ID for anti-replay.
+// A Fabric snapshot does not provide its validation status or block position.
+message TransactionIDRecord {
+  string transaction_id = 1;
+}

@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package fabricx.migration.v1;
+
+option go_package = "github.com/syndbg/fabric-x-migrate-poc/pkg/genesisdata";
+
+// TODO(schema-ownership): Move this schema to hyperledger/fabric-x-common once
+// maintainers accept the format. The exporter and committer must share one
+// generated package; neither repository should carry an independent copy.
+
+// StateRecord is one public Fabric state entry mapped to a Fabric-X namespace.
+message StateRecord {
+  string source_namespace = 1;
+  string target_namespace = 2;
+  bytes key = 3;
+  bytes value = 4;
+  bytes metadata = 5;
+  bytes source_version = 6;
+  uint64 source_block_number = 7;
+  uint64 source_transaction_number = 8;
+}
