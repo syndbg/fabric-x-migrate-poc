@@ -352,6 +352,9 @@ func decodeFrames(name string, data []byte) ([][]byte, error) {
 		if n <= 0 {
 			return nil, fmt.Errorf("%s: invalid record length", name)
 		}
+		if !bytes.Equal(data[offset:offset+n], binary.AppendUvarint(nil, length)) {
+			return nil, fmt.Errorf("%s: non-canonical record length", name)
+		}
 		offset += n
 		if length > uint64(len(data)-offset) {
 			return nil, fmt.Errorf("%s: truncated record", name)

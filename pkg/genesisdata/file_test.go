@@ -1,6 +1,7 @@
 package genesisdata
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,34 @@ func TestRead(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, data, 0o644))
 		_, err = Read(path)
 		require.Error(t, err)
+	})
+
+	t.Run("when a record length uses an overlong uvarint, it rejects the file", func(t *testing.T) {
+		archive, _, err := build(sampleInput(false))
+		require.NoError(t, err)
+		members, err := decodeArchive(archive)
+		require.NoError(t, err)
+
+		state := members[PublicStateFile]
+		length, n := binary.Uvarint(state[1:])
+		require.Positive(t, n)
+		encodedLength := binary.AppendUvarint(nil, length)
+		encodedLength[len(encodedLength)-1] |= 0x80
+		encodedLength = append(encodedLength, 0)
+		state = append(append(append([]byte{}, state[:1]...), encodedLength...), state[1+n:]...)
+
+		manifest, err := decodeManifest(members[ManifestFile])
+		require.NoError(t, err)
+		manifest.Parts[0].SHA256 = hash(state)
+		manifestData, err := marshalManifest(manifest)
+		require.NoError(t, err)
+		archive, err = encodeArchive(manifestData, state, members[TransactionIDFile])
+		require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), "overlong.fxgenesis")
+		require.NoError(t, os.WriteFile(path, archive, 0o644))
+
+		_, err = Read(path)
+		require.ErrorContains(t, err, "non-canonical record length")
 	})
 }
 
