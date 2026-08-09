@@ -1,11 +1,10 @@
 # Fabric-X committer changes for snapshot initialization
 
-This document describes the PoC on
-the [Fabric-X committer migration branch](https://github.com/syndbg/fabric-x-committer/tree/feat-add-fabric-to-fabric-x-migration)
-and follows the
+This document describes the PoC on the
+[Fabric-X committer migration branch](https://github.com/syndbg/fabric-x-committer/tree/feat-add-fabric-to-fabric-x-migration).
+It follows the
 [migration RFC source](https://github.com/syndbg/fabric-rfcs/blob/feat-add-fabric-to-fabric-x-migration/text/0000-fabric-x-snapshot-migration.md).
-It also records the remaining work before the PoC can become a production
-contract.
+The last sections list the work that remains before production use.
 
 ## Public CLI contract
 
@@ -55,8 +54,8 @@ the exporter.
 > and do not copy the `.proto` into the
 > [Fabric-X committer implementation](https://github.com/syndbg/fabric-x-committer/tree/feat-add-fabric-to-fabric-x-migration).
 
-The reader must validate the entire input file before opening a
-database write transaction: archive member set and order, fixed tar headers,
+The reader must validate the entire input file before opening a database write
+transaction: archive member set and order, fixed tar headers,
 manifest encoding, format versions, SHA-256 hashes, protobuf framing,
 deterministic protobuf bytes, record counts, canonical ordering, namespace
 mapping, duplicate keys and transaction IDs, and PDC exclusions.
@@ -156,7 +155,7 @@ migration record fails without changing the database.
 | `service/vc/init_database_tmpl.sql` | `migration_record`, `migrated_tx_ids`, and cross-table duplicate detection |
 | `service/vc/bootstrap.go` | Offline initializer, atomic import, independent read-only verification, activation, bindings, digest scans, and idempotency |
 | `service/vc/bootstrap_test.go` | Database contract and failure-path coverage |
-| `integration/migration/migration_test.go` | Real devnet setup, export, CLI import, verification, activation, restart, two organizations, checkpoint rebuild, and both source versions |
+| `integration/migration/migration_test.go` | Devnet setup, export, CLI import, verification, activation, restart, two organizations, checkpoint rebuild, and both source versions |
 | `utils/testdb/container.go` | Use the published host endpoint so Docker-backed Go tests work on macOS |
 
 No Sidecar block is created for imported state. Normal Fabric-X block history
@@ -215,7 +214,7 @@ go test -tags=integration ./integration/migration \
 ```
 
 The final command builds the committer and creates a disposable Fabric-X
-devnet. It creates the mapped namespace, exports the source snapshot, stops the
+devnet. It creates the mapped namespace, exports the source snapshot, stops
 write-side services, imports the bundle, verifies the target database, and
 activates the migration. It then restarts the services and updates an imported
 key through the Arma orderer. The test expects the new value, a higher target
@@ -238,7 +237,7 @@ activates, restarts, and updates it through a normal Fabric-X transaction.
 
 ## Test status
 
-The tests cover:
+Current test coverage includes:
 
 - Fabric 2.5.16 and 3.1.5 fixture export and devnet import;
 - one-namespace and multiple-namespace imports, checked against target state and transaction IDs;

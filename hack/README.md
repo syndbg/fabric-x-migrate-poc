@@ -1,7 +1,7 @@
 # Fabric snapshot test network
 
-`compose.yaml` is a local development source network. The same topology runs
-either supported source version:
+`compose.yaml` defines the local source network. The topology supports either
+source version:
 
 ```bash
 make run-hack FABRIC_VERSION=2.5.16 STATE_DATABASE=goleveldb
