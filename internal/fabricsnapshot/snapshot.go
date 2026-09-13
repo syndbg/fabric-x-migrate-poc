@@ -239,6 +239,9 @@ func decodeNamespaces(name string, data []byte) ([]Namespace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	if count > uint64(len(data)-offset)/2 {
+		return nil, fmt.Errorf("%s: namespace count exceeds metadata size", name)
+	}
 	result := make([]Namespace, 0, count)
 	for range count {
 		namespace, next, err := sized(data, offset)
@@ -385,6 +388,15 @@ func decodeJSON(data []byte, target any) error {
 }
 
 func readRegular(path string) ([]byte, error) {
+	file, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
+}
+
+func openRegular(path string) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -392,7 +404,16 @@ func readRegular(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("snapshot entry is not a regular file: %s", path)
 	}
-	return os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		file.Close()
+		return nil, fmt.Errorf("snapshot entry changed while opening: %s", path)
+	}
+	return file, nil
 }
 
 func hash(data []byte) string {
