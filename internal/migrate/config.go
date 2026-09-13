@@ -118,7 +118,7 @@ func publicMSP(group *cb.ConfigGroup) (string, *mb.MSPConfig, error) {
 			return "", nil, err
 		}
 		if msp.Name == "" || msp.Signer != nil {
-			return "", nil, errors.New("Idemix MSP must contain an ID and public verification material only")
+			return "", nil, errors.New("idemix MSP must contain an ID and public verification material only")
 		}
 		return msp.Name, config, nil
 	default:
@@ -395,6 +395,11 @@ func preparePolicies(config MappingConfig, snapshots map[string]*fabricsnapshot.
 		bundle, err := sources[channel].bundle()
 		if err != nil {
 			return nil, fmt.Errorf("source channel %s: %w", channel, err)
+		}
+		// Copying MSP bytes alone does not preserve validation semantics: older
+		// channel capabilities can disable roles such as peer and admin Node OUs.
+		if targetBundle.ChannelConfig().Capabilities().MSPVersion() < bundle.ChannelConfig().Capabilities().MSPVersion() {
+			return nil, fmt.Errorf("target channel capabilities downgrade MSP validation from source channel %s", channel)
 		}
 		definitions, err := readChaincodePolicies(s, config)
 		if err != nil {

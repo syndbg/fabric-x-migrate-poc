@@ -139,8 +139,8 @@ func readRegular(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	return io.ReadAll(file)
+	data, readErr := io.ReadAll(file)
+	return data, errors.Join(readErr, file.Close())
 }
 
 func openRegular(path string) (*os.File, error) {
@@ -157,8 +157,7 @@ func openRegular(path string) (*os.File, error) {
 	}
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
-		file.Close()
-		return nil, fmt.Errorf("snapshot entry changed while opening: %s", path)
+		return nil, errors.Join(fmt.Errorf("snapshot entry changed while opening: %s", path), file.Close())
 	}
 	return file, nil
 }

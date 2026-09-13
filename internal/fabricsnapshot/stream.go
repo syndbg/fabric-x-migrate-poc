@@ -199,7 +199,7 @@ func (s *SnapshotStream) WalkPrivateHashRecords(yield func(Record) error) error 
 	return s.walkRecords("private_state_hashes", yield)
 }
 
-func (s *SnapshotStream) walkRecords(prefix string, yield func(Record) error) error {
+func (s *SnapshotStream) walkRecords(prefix string, yield func(Record) error) (returnErr error) {
 	namespaces, err := s.readNamespaces(prefix)
 	if err != nil {
 		return err
@@ -209,7 +209,7 @@ func (s *SnapshotStream) walkRecords(prefix string, yield func(Record) error) er
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
 	hasher := sha256.New()
 	reader := bufio.NewReader(io.TeeReader(file, hasher))
 	version, err := reader.ReadByte()
@@ -293,12 +293,12 @@ func readSized(reader *bufio.Reader) ([]byte, error) {
 	return data.Bytes(), nil
 }
 
-func hashRegularFile(path string) (string, error) {
+func hashRegularFile(path string) (digest string, returnErr error) {
 	file, err := openRegular(path)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
 		return "", err

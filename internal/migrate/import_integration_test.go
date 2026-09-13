@@ -23,6 +23,14 @@ func TestImport(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set FABRIC_X_MIGRATION_TEST_DATABASE_URL to a disposable PostgreSQL or YugabyteDB server with CREATE DATABASE permission")
 	}
+	runImportTests(t, dsn)
+	if yugabyteDSN := os.Getenv("FABRIC_X_MIGRATION_TEST_YUGABYTE_DATABASE_URL"); yugabyteDSN != "" {
+		t.Run("YugabyteDB", func(t *testing.T) { runImportTests(t, yugabyteDSN) })
+	}
+}
+
+func runImportTests(t *testing.T, dsn string) {
+	t.Helper()
 	ctx := context.Background()
 	t.Run("independent organizations and both hash destinations", func(t *testing.T) {
 		for _, separate := range []bool{false, true} {

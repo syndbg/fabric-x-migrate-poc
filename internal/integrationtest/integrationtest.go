@@ -34,6 +34,10 @@ func Capture(t *testing.T, repository, stateDB string, channels ...string) map[s
 type Source struct {
 	Snapshot    string
 	ConfigBlock string
+	// Test-only signing material for exercising the reused policy after import.
+	// These paths are never passed to the migration CLI.
+	PeerMSPDir  string
+	AdminMSPDir string
 }
 
 func CaptureSources(t *testing.T, repository, stateDB string, channels ...string) map[string]Source {
@@ -41,7 +45,11 @@ func CaptureSources(t *testing.T, repository, stateDB string, channels ...string
 	network := newFabricNetwork(t, repository, stateDB)
 	result := map[string]Source{}
 	for channel, snapshot := range network.capture(channels...) {
-		result[channel] = Source{Snapshot: snapshot, ConfigBlock: filepath.Join(network.root, channel+".block")}
+		result[channel] = Source{
+			Snapshot: snapshot, ConfigBlock: filepath.Join(network.root, channel+".block"),
+			PeerMSPDir:  network.crypto("peerOrganizations", "org1.example.com", "peers", "peer0.org1.example.com", "msp"),
+			AdminMSPDir: network.crypto("peerOrganizations", "org1.example.com", "users", "Admin@org1.example.com", "msp"),
+		}
 	}
 	return result
 }
@@ -136,6 +144,7 @@ func (f *fabricNetwork) deploy(channels []string) {
 	}{
 		{name: "basic", path: filepath.Join(f.samples, "asset-transfer-basic", "chaincode-go")},
 		{name: "private", path: filepath.Join(f.samples, "asset-transfer-private-data", "chaincode-go"), collections: filepath.Join(f.root, "collections.json")},
+		{name: "singlepublic", path: singleCollection},
 		{name: "singleprivate", path: singleCollection, collections: filepath.Join(f.root, "collections.json")},
 	}
 	for i := range chaincodes {
@@ -160,6 +169,7 @@ func (f *fabricNetwork) deploy(channels []string) {
 		}
 		invoke := append([]string{"chaincode", "invoke"}, f.ordererArgs()...)
 		f.runPeer(append(invoke, "-C", channel, "-n", "basic", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "-c", `{"function":"InitLedger","Args":[]}`)...)
+		f.runPeer(append(invoke, "-C", channel, "-n", "singlepublic", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "-c", `{"function":"SeedPublic","Args":[]}`)...)
 		f.runPeer(append(invoke, "-C", channel, "-n", "singleprivate", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "-c", `{"function":"Seed","Args":[]}`)...)
 		asset := base64.StdEncoding.EncodeToString([]byte(`{"objectType":"asset","assetID":"asset-private-1","color":"blue","size":5,"appraisedValue":100}`))
 		f.runPeer(append(invoke, "-C", channel, "-n", "private", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "--transient", fmt.Sprintf(`{"asset_properties":"%s"}`, asset), "-c", `{"function":"CreateAsset","Args":[]}`)...)
@@ -340,9 +350,15 @@ import "github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
 
 type Contract struct { contractapi.Contract }
 
+func (c *Contract) SeedPublic(ctx contractapi.TransactionContextInterface) error {
+	channel := ctx.GetStub().GetChannelID()
+	return ctx.GetStub().PutState(channel+"-public-key", []byte(channel+"-public-value"))
+}
+
 func (c *Contract) Seed(ctx contractapi.TransactionContextInterface) error {
-	if err := ctx.GetStub().PutState("public-key", []byte("public-value")); err != nil { return err }
-	return ctx.GetStub().PutPrivateData("assetCollection", "private-key", []byte("private-value"))
+	channel := ctx.GetStub().GetChannelID()
+	if err := c.SeedPublic(ctx); err != nil { return err }
+	return ctx.GetStub().PutPrivateData("assetCollection", channel+"-private-key", []byte(channel+"-private-value"))
 }
 
 func main() {

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+          args: ./...
+      - name: Check formatting
+        run: |
+          git ls-files '*.go' | xargs gofmt -l | tee /tmp/gofmt-files
+          test ! -s /tmp/gofmt-files
+      - run: go test ./... -count=1 -timeout=5m
+      - run: make build
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:16.13
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 25432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      yugabyte:
+        image: yugabytedb/yugabyte:2025.2.0.1-b1
+        command: bin/yugabyted start --daemon=false --tserver_flags=ysql_yb_ddl_transaction_block_enabled=true
+        ports:
+          - 25433:5433
+        options: >-
+          --health-cmd "bin/ysqlsh -h $(hostname -i) -U yugabyte -d yugabyte -c 'SELECT 1'"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+    env:
+      FABRIC_X_MIGRATION_TEST_DATABASE_URL: postgres://postgres@localhost:25432/postgres?sslmode=disable
+      FABRIC_X_MIGRATION_TEST_YUGABYTE_DATABASE_URL: postgres://yugabyte@localhost:25433/yugabyte?sslmode=disable
+      FABRIC_X_MIGRATION_TEST_FABRIC: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make build runtime-binaries
+      - name: Test imports, live LevelDB and CouchDB snapshots, and application authorization
+        run: go test -tags=integration ./internal/migrate -count=1 -timeout=35m -v

@@ -72,6 +72,9 @@ system namespace policies. The tool adds missing source application MSPs and
 rejects conflicting MSP definitions. It validates the resolved configuration and
 application namespace policies with the upstream committer code before writing.
 Signing keys are not inputs.
+Target channel capabilities must support at least the source MSP version;
+otherwise migration fails before writing, since older MSP versions can disable
+source peer and admin role checks.
 
 The JSON report includes the resolved standard CONFIG envelope as Base64 in
 `target_config_envelope`. Save it for the target's offline startup configuration:
@@ -189,33 +192,40 @@ drop test databases. YugabyteDB requires the tserver setting
 `ysql_yb_ddl_transaction_block_enabled=true` for atomic table creation and import;
 the CLI checks this before writing. See [YugabyteDB transactional DDL](https://docs.yugabyte.com/stable/explore/transactions/transactional-ddl/).
 The database checks pass on PostgreSQL 16.13 and YugabyteDB 2025.2.0.1-b1 with
-that setting enabled. Normal startup and application transactions pass against
-the pinned upstream committer. Live Fabric 3.1.5 tests capture two source channels using both LevelDB
-and CouchDB, import public state and private hashes, and check collection-key
-collision rollback.
+that setting enabled.
+
+The live Fabric 3.1.5 suite covers these mappings with both LevelDB and CouchDB:
+
+| Source mapping | Hash destination |
+| --- | --- |
+| One channel | No hashes, with public state, or in a separate namespace |
+| Two channels, separate application namespaces | No hashes, with public state, or in separate hash namespaces |
+| Two channels, one shared application namespace | No hashes, with public state, or in one separate hash namespace |
+
+Each of the 18 cases runs the CLI against two independent, empty databases with
+identical inputs. Tests compare every imported key, value, hash, version, and
+record count against the known source writes. They then start the upstream
+Fabric-X committer services with the upstream mock orderer against one imported
+database, check exact application reads
+and private-key exclusion, update public and hash rows using the source peer
+identity, and reject writes from a source administrator in every destination
+namespace. Collection hash collisions must roll back with either hash destination.
 
 The source-network harness and Fabric configuration are under `hack/` and
 `internal/integrationtest/`. `make run-hack` starts a local Fabric source network;
 `make stop-hack` stops it and deletes its volumes. Run `make help` for the available
 targets.
 
-To run normal startup and transaction checks using the pinned upstream committer:
+To run the complete real-snapshot and Fabric-X startup matrix:
 
 ```sh
-make runtime-binaries
-FABRIC_X_MIGRATION_TEST_RUNTIME=1 \
-FABRIC_X_MIGRATION_TEST_DATABASE_URL='postgres://postgres@localhost:25432/postgres?sslmode=disable' \
-go test -tags=integration ./internal/migrate -run '^TestNormalRuntimeAfterImport$' -count=1 -v
-```
-
-To capture fresh Fabric snapshots and run the migration against them:
-
-```sh
+make build runtime-binaries
 FABRIC_X_MIGRATION_TEST_FABRIC=1 \
 FABRIC_X_MIGRATION_TEST_DATABASE_URL='postgres://postgres@localhost:25432/postgres?sslmode=disable' \
-go test -tags=integration ./internal/migrate -run '^TestFabricSnapshots$' -count=1 -v
+go test -tags=integration ./internal/migrate -run '^TestFabricSnapshots$' -count=1 -timeout=20m -v
 ```
 
 This starts and removes a disposable Fabric network. It reuses the pinned
 `fabric-samples` checkout and includes a small test contract that writes one
-public value and one value in a private collection.
+public value and one value in a private collection per channel. The startup
+checks are part of this suite; there is no separate runtime opt-in flag.

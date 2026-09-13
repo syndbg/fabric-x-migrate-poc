@@ -70,6 +70,12 @@ func TestMappingsAndPolicies(t *testing.T) {
 		_, err := preparePolicies(config, snapshots, map[string]*channelConfig{"assets": sources["assets"], "securities": changed}, testChannel(t, "network1"))
 		require.ErrorContains(t, err, "conflicting endorsement policies")
 	})
+	t.Run("target cannot downgrade source MSP validation", func(t *testing.T) {
+		older := testChannel(t, "network1")
+		delete(older.config.Config.ChannelGroup.Values, "Capabilities")
+		_, err := preparePolicies(config, snapshots, sources, older)
+		require.ErrorContains(t, err, "downgrade MSP validation")
+	})
 
 	t.Run("conflicting membership", func(t *testing.T) {
 		conflicting := testChannel(t, "network1")
