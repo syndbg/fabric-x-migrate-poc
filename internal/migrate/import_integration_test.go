@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric-x-committer/utils/statedb"
 	"github.com/stretchr/testify/require"
 	"github.com/yugabyte/pgx/v5"
 	"github.com/yugabyte/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestImport(t *testing.T) {
@@ -46,6 +49,49 @@ func TestImport(t *testing.T) {
 			require.ErrorContains(t, err, "is not empty")
 		}
 	})
+	t.Run("matching configuration envelope is normalized", func(t *testing.T) {
+		options := testOptions(t, false)
+		pool := testDatabase(t, dsn)
+		data, err := os.ReadFile(options.TargetConfigPath)
+		require.NoError(t, err)
+		envelope := new(cb.Envelope)
+		require.NoError(t, proto.Unmarshal(data, envelope))
+		envelope.Signature = []byte("old envelope signature")
+		_, err = pool.Exec(ctx, statedb.MakeNsTablesQuery("_config", 0))
+		require.NoError(t, err)
+		_, err = pool.Exec(ctx, "INSERT INTO ns__config (key,value) VALUES ($1,$2)", []byte("_config"), marshal(t, envelope))
+		require.NoError(t, err)
+		result, err := Import(ctx, pool, options)
+		require.NoError(t, err)
+		var installed []byte
+		require.NoError(t, pool.QueryRow(ctx, "SELECT value FROM ns__config WHERE key=$1", []byte("_config")).Scan(&installed))
+		require.Equal(t, result.TargetConfigEnvelope, installed)
+	})
+
+	t.Run("multiple bounded batches", func(t *testing.T) {
+		options := testOptions(t, false)
+		options.Snapshots["assets"] = testSnapshotRecords(t, "assets", 1, 1025)
+		pool := testDatabase(t, dsn)
+		result, err := Import(ctx, pool, options)
+		require.NoError(t, err)
+		require.Equal(t, uint64(1028), result.RecordCount)
+		require.Len(t, readRows(t, pool, "basic"), 1028)
+	})
+	t.Run("input changes after preflight roll back", func(t *testing.T) {
+		options := testOptions(t, false)
+		pool := testDatabase(t, dsn)
+		config := pool.Config()
+		config.AfterConnect = func(context.Context, *pgx.Conn) error {
+			return os.WriteFile(options.MappingPath, []byte("changed"), 0o600)
+		}
+		changing, err := pgxpool.NewWithConfig(ctx, config)
+		require.NoError(t, err)
+		defer changing.Close()
+		_, err = Import(ctx, changing, options)
+		require.ErrorContains(t, err, "input changed during import")
+		requireNoTables(t, pool)
+	})
+
 	t.Run("colliding identical records roll back all tables", func(t *testing.T) {
 		options := testOptions(t, false)
 		options.Snapshots["securities"] = testSnapshot(t, "securities", 1)
@@ -62,7 +108,7 @@ func TestImport(t *testing.T) {
 		require.Error(t, err)
 		requireNoTables(t, pool)
 	})
-	t.Run("concurrent imports cannot both succeed", func(t *testing.T) {
+	t.Run("concurrent imports roll back or serialize", func(t *testing.T) {
 		options := testOptions(t, false)
 		pool := testDatabase(t, dsn)
 		var wg sync.WaitGroup
@@ -78,7 +124,13 @@ func TestImport(t *testing.T) {
 				successes++
 			}
 		}
-		require.Equal(t, 1, successes)
+		require.LessOrEqual(t, successes, 1)
+		if successes == 0 {
+			// YugabyteDB can abort both transactions when their DDL conflicts.
+			requireNoTables(t, pool)
+			_, err := Import(ctx, pool, options)
+			require.NoError(t, err)
+		}
 		require.Len(t, readRows(t, pool, "basic"), 4)
 	})
 }

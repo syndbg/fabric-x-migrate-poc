@@ -30,9 +30,8 @@ make build
 4. Run the same import independently for each organization, changing only the
    database connection.
 5. Compare the source identities, mappings, resolved configuration, policies, and
-   database record counts in the reports. Complete Fabric-X database digest
-   verification when that feature becomes available, before starting services or
-   enabling application traffic.
+   database record counts in the reports before starting services. Check application
+   reads and authorization before enabling application traffic.
 
 `mappings.json`, for one channel:
 
@@ -144,8 +143,8 @@ framing, and source record order. It supports the official SimpleKeyValueDB and
 CouchDB snapshot formats. It reads records with bounded memory and discards
 source key versions after checking them.
 
-The tool reads selected committed `_lifecycle` definitions, resolves endorsement
-policy references in their original source channel, and reuses collection
+The tool reads selected committed `_lifecycle` or legacy `lscc` definitions,
+resolves endorsement policy references in their original source channel, and reuses collection
 endorsement policies where present. It rejects unsupported validation plugins,
 conflicting namespace policies, and key-level metadata it cannot preserve.
 Unmapped application state and lifecycle state are not copied into application
@@ -169,7 +168,8 @@ Fabric-X block history cannot reconstruct the imported rows.
 The Fabric-X database state digest feature is being implemented separately and
 is **not available yet**. This PoC does not compute a custom digest or provide a
 fallback. Record counts alone do not establish state equality across committers.
-Full migration verification and cutover depend on that feature.
+Once the separate feature is available, use it to compare database state across
+committers.
 
 Unit tests cover source parsing, mappings, MSP conflicts, and policy conversion.
 The database test uses two independent databases and covers public state, both
@@ -185,11 +185,37 @@ go test -tags=integration ./internal/migrate -run '^TestImport$' -count=1 -v
 ```
 
 Use a disposable PostgreSQL or YugabyteDB server with permission to create and
-drop test databases. Full normal-startup and application-transaction validation,
-YugabyteDB validation, and end-to-end runs against freshly captured snapshots
-remain part of the PoC work.
+drop test databases. YugabyteDB requires the tserver setting
+`ysql_yb_ddl_transaction_block_enabled=true` for atomic table creation and import;
+the CLI checks this before writing. See [YugabyteDB transactional DDL](https://docs.yugabyte.com/stable/explore/transactions/transactional-ddl/).
+The database checks pass on PostgreSQL 16.13 and YugabyteDB 2025.2.0.1-b1 with
+that setting enabled. Normal startup and application transactions pass against
+the pinned upstream committer. Live Fabric 3.1.5 tests capture two source channels using both LevelDB
+and CouchDB, import public state and private hashes, and check collection-key
+collision rollback.
 
 The source-network harness and Fabric configuration are under `hack/` and
 `internal/integrationtest/`. `make run-hack` starts a local Fabric source network;
 `make stop-hack` stops it and deletes its volumes. Run `make help` for the available
 targets.
+
+To run normal startup and transaction checks using the pinned upstream committer:
+
+```sh
+make runtime-binaries
+FABRIC_X_MIGRATION_TEST_RUNTIME=1 \
+FABRIC_X_MIGRATION_TEST_DATABASE_URL='postgres://postgres@localhost:25432/postgres?sslmode=disable' \
+go test -tags=integration ./internal/migrate -run '^TestNormalRuntimeAfterImport$' -count=1 -v
+```
+
+To capture fresh Fabric snapshots and run the migration against them:
+
+```sh
+FABRIC_X_MIGRATION_TEST_FABRIC=1 \
+FABRIC_X_MIGRATION_TEST_DATABASE_URL='postgres://postgres@localhost:25432/postgres?sslmode=disable' \
+go test -tags=integration ./internal/migrate -run '^TestFabricSnapshots$' -count=1 -v
+```
+
+This starts and removes a disposable Fabric network. It reuses the pinned
+`fabric-samples` checkout and includes a small test contract that writes one
+public value and one value in a private collection.

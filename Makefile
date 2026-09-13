@@ -22,11 +22,12 @@ PEER_MSP := $(HACK_DIR)/crypto/peerOrganizations/org1.example.com/users/Admin@or
 ORDERER_ADMIN_ARGS := -o localhost:18053 --ca-file $(ORDERER_CA) --client-cert $(ORDERER_CERT) --client-key $(ORDERER_KEY)
 PEER_ENV := FABRIC_CFG_PATH=$(FABRIC_CONFIG) CORE_PEER_TLS_ENABLED=true CORE_PEER_LOCALMSPID=Org1MSP CORE_PEER_MSPCONFIGPATH=$(PEER_MSP) CORE_PEER_ADDRESS=localhost:18051 CORE_PEER_TLS_ROOTCERT_FILE=$(PEER_CA)
 
-.PHONY: help build test test-integration lint lint-fix hack-samples hack-fabric run-hack stop-hack hack-status
+.PHONY: help build runtime-binaries test test-integration lint lint-fix hack-samples hack-fabric run-hack stop-hack hack-status
 
 help:
 	@printf '%s\n' \
 		'build             build artifacts/bin/fabric-x-migrate' \
+		'runtime-binaries  build upstream committer and mock orderer for startup tests' \
 		'test              run unit tests' \
 		'test-integration  run Fabric and direct-import integration tests' \
 		'lint              run golangci-lint' \
@@ -40,6 +41,11 @@ help:
 build:
 	@mkdir -p artifacts/bin
 	go build -o artifacts/bin/fabric-x-migrate ./cmd/fabric-x-migrate
+
+runtime-binaries:
+	@mkdir -p artifacts/runtime/bin
+	go build -o artifacts/runtime/bin/committer github.com/hyperledger/fabric-x-committer/cmd/committer
+	go build -o artifacts/runtime/bin/mock github.com/hyperledger/fabric-x-committer/cmd/mock
 
 test:
 	go test ./... -v

@@ -274,7 +274,7 @@ type chaincodePolicy struct {
 func readChaincodePolicies(s *fabricsnapshot.SnapshotStream, mappings MappingConfig) (map[string]chaincodePolicy, error) {
 	fields := map[string][]byte{}
 	if err := s.WalkPublicRecords(func(record fabricsnapshot.Record) error {
-		if record.Namespace != "_lifecycle" {
+		if record.Namespace != "_lifecycle" && record.Namespace != "lscc" {
 			return nil
 		}
 		for _, mapping := range mappings.Mappings {
@@ -282,7 +282,14 @@ func readChaincodePolicies(s *fabricsnapshot.SnapshotStream, mappings MappingCon
 				continue
 			}
 			key := string(record.Key)
-			if key == "namespaces/metadata/"+mapping.SourceNamespace || strings.HasPrefix(key, "namespaces/fields/"+mapping.SourceNamespace+"/") {
+			if record.Namespace == "lscc" {
+				if key == mapping.SourceNamespace || key == mapping.SourceNamespace+"~collection" {
+					fields["lscc/"+key] = record.Value
+				}
+				continue
+			}
+			prefix := "namespaces/fields/" + mapping.SourceNamespace + "/"
+			if key == "namespaces/metadata/"+mapping.SourceNamespace || key == prefix+"Sequence" || key == prefix+"ValidationInfo" || key == prefix+"Collections" {
 				fields[key] = record.Value
 			}
 		}
@@ -299,6 +306,21 @@ func readChaincodePolicies(s *fabricsnapshot.SnapshotStream, mappings MappingCon
 		metadata := new(lb.StateMetadata)
 		if err := proto.Unmarshal(fields["namespaces/metadata/"+namespace], metadata); err != nil {
 			return nil, err
+		}
+		if metadata.Datatype == "" && fields["lscc/"+namespace] != nil {
+			legacy := new(pb.ChaincodeData)
+			if err := proto.Unmarshal(fields["lscc/"+namespace], legacy); err != nil {
+				return nil, err
+			}
+			if legacy.Name != namespace || legacy.Vscc != "vscc" || legacy.Policy == nil {
+				return nil, fmt.Errorf("%s/%s has an unsupported legacy chaincode definition", s.Metadata.ChannelName, namespace)
+			}
+			collections := new(pb.CollectionConfigPackage)
+			if err := proto.Unmarshal(fields["lscc/"+namespace+"~collection"], collections); err != nil {
+				return nil, err
+			}
+			result[namespace] = chaincodePolicy{application: &pb.ApplicationPolicy{Type: &pb.ApplicationPolicy_SignaturePolicy{SignaturePolicy: legacy.Policy}}, collections: collections}
+			continue
 		}
 		if metadata.Datatype != "ChaincodeDefinition" {
 			return nil, fmt.Errorf("%s/%s has no committed lifecycle chaincode definition", s.Metadata.ChannelName, namespace)

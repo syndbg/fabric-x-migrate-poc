@@ -3,17 +3,27 @@ package migrate
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/hyperledger/fabric-x-committer/utils/statedb"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/syndbg/fabric-x-migrate-poc/internal/fabricsnapshot"
 	"github.com/yugabyte/pgx/v5"
 	"github.com/yugabyte/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 )
 
 const insertBatchSize = 512
+
+// The upstream system schema at the committer version pinned in go.mod.
+// SetupSystemTablesAndNamespaces opens its own transaction, so embed this SQL
+// to make system setup roll back together with the imported application rows.
+//
+//go:embed system.sql
+var systemSQL string
 
 type NamespaceResult struct {
 	Namespace   string `json:"namespace"`
@@ -160,12 +170,25 @@ func Import(ctx context.Context, pool *pgxpool.Pool, options Options) (*Result, 
 	if err := revalidate(); err != nil {
 		return nil, err
 	}
+	var databaseVersion string
+	if err := pool.QueryRow(ctx, "SELECT version()").Scan(&databaseVersion); err != nil {
+		return nil, err
+	}
+	if strings.Contains(databaseVersion, "-YB-") {
+		var transactionalDDL string
+		if err := pool.QueryRow(ctx, "SELECT current_setting('yb_ddl_transaction_block_enabled', true)").Scan(&transactionalDDL); err != nil || transactionalDDL != "on" {
+			return nil, errors.New("YugabyteDB requires ysql_yb_ddl_transaction_block_enabled=true for atomic namespace creation and import")
+		}
+	}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin target import: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	for _, namespace := range []string{committerpb.ConfigNamespaceID, committerpb.MetaNamespaceID} {
+	if _, err := tx.Exec(ctx, systemSQL); err != nil {
+		return nil, fmt.Errorf("prepare committer system schema: %w", err)
+	}
+	for _, namespace := range committerpb.SystemNamespaces() {
 		if _, err := tx.Exec(ctx, statedb.MakeNsTablesQuery(namespace, 0)); err != nil {
 			return nil, fmt.Errorf("create system namespace %s: %w", namespace, err)
 		}
@@ -250,10 +273,23 @@ func ensureEntry(ctx context.Context, tx pgx.Tx, namespace, key string, value []
 	if err := tx.QueryRow(ctx, "SELECT value, version FROM "+table+" WHERE key=$1 FOR UPDATE", []byte(key)).Scan(&existing, &version); err != nil {
 		return err
 	}
-	if !bytes.Equal(existing, value) || version != 0 {
+	if version != 0 {
 		return fmt.Errorf("existing configuration conflicts at %s/%s", namespace, key)
 	}
-	return nil
+	if bytes.Equal(existing, value) {
+		return nil
+	}
+	if namespace == committerpb.ConfigNamespaceID {
+		actual, actualErr := decodeChannelConfig(existing)
+		expected, expectedErr := decodeChannelConfig(value)
+		if actualErr == nil && expectedErr == nil && actual.channel == expected.channel && proto.Equal(actual.config.Config, expected.config.Config) {
+			// Envelope signatures and serialization order do not change membership.
+			// Store the agreed encoding so independent imports produce identical rows.
+			_, err := tx.Exec(ctx, "UPDATE "+table+" SET value=$2 WHERE key=$1", []byte(key), value)
+			return err
+		}
+	}
+	return fmt.Errorf("existing configuration conflicts at %s/%s", namespace, key)
 }
 
 func namespaceTable(namespace string) string {

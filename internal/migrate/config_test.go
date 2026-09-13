@@ -15,6 +15,7 @@ import (
 	pb "github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	lb "github.com/hyperledger/fabric-protos-go-apiv2/peer/lifecycle"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
+	"github.com/hyperledger/fabric-x-common/common/policydsl"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
@@ -63,6 +64,13 @@ func TestMappingsAndPolicies(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(policy.GetMspRule(), signature))
 	require.NotEmpty(t, signature.Identities)
 
+	t.Run("conflicting source endorsement policies", func(t *testing.T) {
+		changed := testChannel(t, "securities")
+		changed.application().Policies["Endorsement"] = &cb.ConfigPolicy{Policy: &cb.Policy{Type: int32(cb.Policy_SIGNATURE), Value: marshal(t, policydsl.SignedByMspAdmin("Org1MSP"))}}
+		_, err := preparePolicies(config, snapshots, map[string]*channelConfig{"assets": sources["assets"], "securities": changed}, testChannel(t, "network1"))
+		require.ErrorContains(t, err, "conflicting endorsement policies")
+	})
+
 	t.Run("conflicting membership", func(t *testing.T) {
 		conflicting := testChannel(t, "network1")
 		for _, group := range conflicting.application().Groups {
@@ -85,6 +93,25 @@ func TestMappingsAndPolicies(t *testing.T) {
 		_, err = readMappings(inputFile{data: marshalJSON(t, bad)})
 		require.ErrorContains(t, err, "reserved")
 	})
+}
+
+func TestLegacyChaincodePolicy(t *testing.T) {
+	dir := t.TempDir()
+	policy := policydsl.SignedByMspPeer("Org1MSP")
+	data := appendRecord([]byte{1}, []byte("asset"), []byte("value"))
+	data = appendRecord(data, []byte("basic"), marshal(t, &pb.ChaincodeData{Name: "basic", Vscc: "vscc", Policy: policy}))
+	metadata := []byte{1, 2}
+	for _, ns := range []string{"basic", "lscc"} {
+		metadata = appendSized(metadata, []byte(ns))
+		metadata = binary.AppendUvarint(metadata, 1)
+	}
+	writeSnapshot(t, dir, "assets", map[string][]byte{"public_state.data": data, "public_state.metadata": metadata})
+	snapshot, err := fabricsnapshot.OpenStream(dir)
+	require.NoError(t, err)
+	mapping := MappingConfig{TargetNetwork: "network1", Mappings: []Mapping{{SourceChannel: "assets", SourceNamespace: "basic", TargetNamespace: "basic"}}}
+	definitions, err := readChaincodePolicies(snapshot, mapping)
+	require.NoError(t, err)
+	require.True(t, proto.Equal(policy, definitions["basic"].application.GetSignaturePolicy()))
 }
 
 func TestCanonicalPolicyPreservesThresholdAndIgnoresOrdering(t *testing.T) {
@@ -152,10 +179,18 @@ func testOptions(t *testing.T, separateHashes bool) Options {
 	return options
 }
 
-func testSnapshot(t *testing.T, channel string, keyByte byte) string {
+func testSnapshot(t *testing.T, channel string, keyByte byte, override ...*pb.ApplicationPolicy) string {
+	t.Helper()
+	return testSnapshotRecords(t, channel, keyByte, 1, override...)
+}
+
+func testSnapshotRecords(t *testing.T, channel string, keyByte byte, count uint64, override ...*pb.ApplicationPolicy) string {
 	t.Helper()
 	dir := t.TempDir()
 	application := &pb.ApplicationPolicy{Type: &pb.ApplicationPolicy_ChannelConfigPolicyReference{ChannelConfigPolicyReference: "/Channel/Application/Endorsement"}}
+	if len(override) > 0 {
+		application = override[0]
+	}
 	validation := &lb.ChaincodeValidationInfo{ValidationPlugin: "vscc", ValidationParameter: marshal(t, application)}
 	collections := &pb.CollectionConfigPackage{Config: []*pb.CollectionConfig{{Payload: &pb.CollectionConfig_StaticCollectionConfig{StaticCollectionConfig: &pb.StaticCollectionConfig{Name: "owners"}}}}}
 	lifecycle := map[string][]byte{
@@ -168,12 +203,18 @@ func testSnapshot(t *testing.T, channel string, keyByte byte) string {
 	for _, key := range sortedKeys(lifecycle) {
 		data = appendRecord(data, []byte(key), lifecycle[key])
 	}
-	data = appendRecord(data, []byte{keyByte}, []byte("public value"))
+	for i := range count {
+		key := []byte{keyByte}
+		if count > 1 {
+			key = binary.BigEndian.AppendUint64(nil, i)
+		}
+		data = appendRecord(data, key, []byte("public value"))
+	}
 	metadata := binary.AppendUvarint([]byte{1}, 2)
 	metadata = appendSized(metadata, []byte("_lifecycle"))
 	metadata = binary.AppendUvarint(metadata, uint64(len(lifecycle)))
 	metadata = appendSized(metadata, []byte("basic"))
-	metadata = binary.AppendUvarint(metadata, 1)
+	metadata = binary.AppendUvarint(metadata, count)
 	hashData := appendRecord([]byte{1}, bytes.Repeat([]byte{keyByte}, 32), bytes.Repeat([]byte{42}, 32))
 	hashMetadata := binary.AppendUvarint(appendSized([]byte{1, 1}, []byte("basic$$howners")), 1)
 	writeSnapshot(t, dir, channel, map[string][]byte{"public_state.data": data, "public_state.metadata": metadata, "private_state_hashes.data": hashData, "private_state_hashes.metadata": hashMetadata})

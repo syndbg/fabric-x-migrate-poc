@@ -30,6 +30,22 @@ func Capture(t *testing.T, repository, stateDB string, channels ...string) map[s
 	return newFabricNetwork(t, repository, stateDB).capture(channels...)
 }
 
+// Source holds the peer snapshot and the channel configuration effective at it.
+type Source struct {
+	Snapshot    string
+	ConfigBlock string
+}
+
+func CaptureSources(t *testing.T, repository, stateDB string, channels ...string) map[string]Source {
+	t.Helper()
+	network := newFabricNetwork(t, repository, stateDB)
+	result := map[string]Source{}
+	for channel, snapshot := range network.capture(channels...) {
+		result[channel] = Source{Snapshot: snapshot, ConfigBlock: filepath.Join(network.root, channel+".block")}
+	}
+	return result
+}
+
 type fabricNetwork struct {
 	t       *testing.T
 	root    string
@@ -104,6 +120,14 @@ func (f *fabricNetwork) joinChannel(channel string) {
 
 func (f *fabricNetwork) deploy(channels []string) {
 	f.t.Helper()
+	singleCollection := filepath.Join(f.root, "single-collection")
+	require.NoError(f.t, os.MkdirAll(singleCollection, 0o700))
+	for _, name := range []string{"go.mod", "go.sum"} {
+		data, err := os.ReadFile(filepath.Join(f.samples, "asset-transfer-private-data", "chaincode-go", name))
+		require.NoError(f.t, err)
+		require.NoError(f.t, os.WriteFile(filepath.Join(singleCollection, name), data, 0o600))
+	}
+	require.NoError(f.t, os.WriteFile(filepath.Join(singleCollection, "main.go"), []byte(singleCollectionChaincode), 0o600))
 	chaincodes := []struct {
 		name        string
 		path        string
@@ -112,6 +136,7 @@ func (f *fabricNetwork) deploy(channels []string) {
 	}{
 		{name: "basic", path: filepath.Join(f.samples, "asset-transfer-basic", "chaincode-go")},
 		{name: "private", path: filepath.Join(f.samples, "asset-transfer-private-data", "chaincode-go"), collections: filepath.Join(f.root, "collections.json")},
+		{name: "singleprivate", path: singleCollection, collections: filepath.Join(f.root, "collections.json")},
 	}
 	for i := range chaincodes {
 		packagePath := filepath.Join(f.root, chaincodes[i].name+".tar.gz")
@@ -135,6 +160,7 @@ func (f *fabricNetwork) deploy(channels []string) {
 		}
 		invoke := append([]string{"chaincode", "invoke"}, f.ordererArgs()...)
 		f.runPeer(append(invoke, "-C", channel, "-n", "basic", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "-c", `{"function":"InitLedger","Args":[]}`)...)
+		f.runPeer(append(invoke, "-C", channel, "-n", "singleprivate", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "-c", `{"function":"Seed","Args":[]}`)...)
 		asset := base64.StdEncoding.EncodeToString([]byte(`{"objectType":"asset","assetID":"asset-private-1","color":"blue","size":5,"appraisedValue":100}`))
 		f.runPeer(append(invoke, "-C", channel, "-n", "private", "--peerAddresses", "localhost:18051", "--tlsRootCertFiles", f.peerCA(), "--waitForEvent", "--transient", fmt.Sprintf(`{"asset_properties":"%s"}`, asset), "-c", `{"function":"CreateAsset","Args":[]}`)...)
 	}
@@ -307,3 +333,21 @@ func extractFabricRelease(destination string, source io.Reader) error {
 		}
 	}
 }
+
+const singleCollectionChaincode = `package main
+
+import "github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
+
+type Contract struct { contractapi.Contract }
+
+func (c *Contract) Seed(ctx contractapi.TransactionContextInterface) error {
+	if err := ctx.GetStub().PutState("public-key", []byte("public-value")); err != nil { return err }
+	return ctx.GetStub().PutPrivateData("assetCollection", "private-key", []byte("private-value"))
+}
+
+func main() {
+	cc, err := contractapi.NewChaincode(&Contract{})
+	if err != nil { panic(err) }
+	if err := cc.Start(); err != nil { panic(err) }
+}
+`

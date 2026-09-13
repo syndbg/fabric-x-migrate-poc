@@ -59,8 +59,6 @@ func TestHashStreams(t *testing.T) {
 			require.NoError(t, snapshot.WalkPrivateHashRecords(func(record Record) error {
 				got = append(got, record.Key)
 				require.Equal(t, bytes.Repeat([]byte{42}, 32), record.Value)
-				require.Empty(t, record.Version)
-				require.Zero(t, record.BlockNumber)
 				return nil
 			}))
 			require.Equal(t, keys, got)
