@@ -20,7 +20,7 @@ The integration tests use their own configuration under
 `internal/integrationtest/testdata`; they do not read this directory:
 
 ```bash
-go test -tags=integration ./internal/cmd -run TestExport -v
+go test -tags=integration ./internal/migrate -run TestImport -v
 ```
 
 Generated crypto material and ledgers remain under the ignored local setup or

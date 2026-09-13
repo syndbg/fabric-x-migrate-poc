@@ -22,16 +22,15 @@ PEER_MSP := $(HACK_DIR)/crypto/peerOrganizations/org1.example.com/users/Admin@or
 ORDERER_ADMIN_ARGS := -o localhost:18053 --ca-file $(ORDERER_CA) --client-cert $(ORDERER_CERT) --client-key $(ORDERER_KEY)
 PEER_ENV := FABRIC_CFG_PATH=$(FABRIC_CONFIG) CORE_PEER_TLS_ENABLED=true CORE_PEER_LOCALMSPID=Org1MSP CORE_PEER_MSPCONFIGPATH=$(PEER_MSP) CORE_PEER_ADDRESS=localhost:18051 CORE_PEER_TLS_ROOTCERT_FILE=$(PEER_CA)
 
-.PHONY: help build test test-integration lint lint-fix regen-proto hack-samples hack-fabric run-hack stop-hack hack-status
+.PHONY: help build test test-integration lint lint-fix hack-samples hack-fabric run-hack stop-hack hack-status
 
 help:
 	@printf '%s\n' \
 		'build             build artifacts/bin/fabric-x-migrate' \
 		'test              run unit tests' \
-		'test-integration  run Fabric export integration tests' \
+		'test-integration  run Fabric and direct-import integration tests' \
 		'lint              run golangci-lint' \
 		'lint-fix          run golangci-lint with safe fixes' \
-		'regen-proto       regenerate protobuf Go' \
 		'hack-samples      checkout the pinned fabric-samples commit' \
 		'hack-fabric       download the selected Fabric release' \
 		'run-hack          start and join the local Fabric source network' \
@@ -46,16 +45,13 @@ test:
 	go test ./... -v
 
 test-integration:
-	go test -tags=integration ./internal/cmd -v
+	go test -tags=integration ./internal/cmd ./internal/migrate -v
 
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
 
 lint-fix:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --fix
-
-regen-proto:
-	go generate ./...
 
 hack-samples:
 	@test -d $(FABRIC_SAMPLES)/.git || git clone --filter=blob:none --depth=1 https://github.com/hyperledger/fabric-samples.git $(FABRIC_SAMPLES)
