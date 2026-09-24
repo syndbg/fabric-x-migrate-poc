@@ -175,8 +175,8 @@ func sortedKeys[V any](values map[string]V) []string {
 	return keys
 }
 
-// canonicalPolicy removes ordering differences introduced by implicit-meta
-// conversion, whose subpolicies come from Go maps. Thresholds remain unchanged.
+// canonicalPolicy normalizes principal indexes without reordering rules. Fabric consumes
+// identities in rule order, including inside nested signature policies.
 func canonicalPolicy(policy *cb.SignaturePolicyEnvelope) ([]byte, error) {
 	policy = proto.Clone(policy).(*cb.SignaturePolicyEnvelope)
 	identities := map[string]*mb.MSPPrincipal{}
@@ -218,11 +218,6 @@ func canonicalPolicy(policy *cb.SignaturePolicyEnvelope) ([]byte, error) {
 					return err
 				}
 			}
-			sort.SliceStable(value.NOutOf.Rules, func(i, j int) bool {
-				a, _ := proto.Marshal(value.NOutOf.Rules[i])
-				b, _ := proto.Marshal(value.NOutOf.Rules[j])
-				return bytes.Compare(a, b) < 0
-			})
 		default:
 			return errors.New("unsupported signature policy rule")
 		}
@@ -234,8 +229,40 @@ func canonicalPolicy(policy *cb.SignaturePolicyEnvelope) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(policy)
 }
 
+func independentRules(rules []*cb.SignaturePolicy, identities []*mb.MSPPrincipal) bool {
+	owners := map[string]int{}
+	var visit func(*cb.SignaturePolicy, int) bool
+	visit = func(rule *cb.SignaturePolicy, branch int) bool {
+		if threshold := rule.GetNOutOf(); threshold != nil {
+			for _, child := range threshold.Rules {
+				if !visit(child, branch) {
+					return false
+				}
+			}
+			return true
+		}
+		principal := identities[rule.GetSignedBy()]
+		role := new(mb.MSPRole)
+		if principal.PrincipalClassification != mb.MSPPrincipal_ROLE || proto.Unmarshal(principal.Principal, role) != nil || role.MspIdentifier == "" {
+			return false
+		}
+		if previous, exists := owners[role.MspIdentifier]; exists && previous != branch {
+			return false
+		}
+		owners[role.MspIdentifier] = branch
+		return true
+	}
+	for branch, rule := range rules {
+		if !visit(rule, branch) {
+			return false
+		}
+	}
+	return true
+}
+
 func resolvePolicy(policy *pb.ApplicationPolicy, bundle *channelconfig.Bundle) ([]byte, error) {
 	var signature *cb.SignaturePolicyEnvelope
+	var referenced policies.Policy
 	switch p := policy.GetType().(type) {
 	case *pb.ApplicationPolicy_SignaturePolicy:
 		signature = p.SignaturePolicy
@@ -244,6 +271,7 @@ func resolvePolicy(policy *pb.ApplicationPolicy, bundle *channelconfig.Bundle) (
 		if !exists {
 			return nil, fmt.Errorf("source policy %q does not exist", p.ChannelConfigPolicyReference)
 		}
+		referenced = resolved
 		converter, ok := resolved.(policies.Converter)
 		if !ok {
 			return nil, fmt.Errorf("source policy %q cannot be represented by a signature policy", p.ChannelConfigPolicyReference)
@@ -263,7 +291,48 @@ func resolvePolicy(policy *pb.ApplicationPolicy, bundle *channelconfig.Bundle) (
 	if err != nil {
 		return nil, err
 	}
+	if referenced != nil {
+		signature = new(cb.SignaturePolicyEnvelope)
+		if err := proto.Unmarshal(canonical, signature); err != nil {
+			return nil, err
+		}
+		if err := normalizeImplicitMeta(referenced, signature.Rule, signature.Identities); err != nil {
+			return nil, err
+		}
+		canonical, err = proto.MarshalOptions{Deterministic: true}.Marshal(signature)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return proto.Marshal(&applicationpb.NamespacePolicy{Rule: &applicationpb.NamespacePolicy_MspRule{MspRule: canonical}})
+}
+
+func normalizeImplicitMeta(source policies.Policy, rule *cb.SignaturePolicy, identities []*mb.MSPPrincipal) error {
+	implicit, ok := source.(*policies.ImplicitMetaPolicy)
+	if !ok {
+		return nil
+	}
+	rules := rule.GetNOutOf().GetRules()
+	if len(rules) != len(implicit.SubPolicies) {
+		return errors.New("implicit-meta conversion changed the number of subpolicies")
+	}
+	for i, child := range implicit.SubPolicies {
+		if err := normalizeImplicitMeta(child, rules[i], identities); err != nil {
+			return err
+		}
+	}
+	// Upstream gathers implicit-meta subpolicies from a Go map. Sort only this
+	// boundary. Each source subpolicy gets its own identity budget, whereas the
+	// converted signature policy shares one, so overlapping MSPs are unsafe.
+	if !independentRules(rules, identities) {
+		return errors.New("implicit-meta subpolicies with overlapping or unsupported principals cannot be preserved")
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		a, _ := proto.Marshal(rules[i])
+		b, _ := proto.Marshal(rules[j])
+		return bytes.Compare(a, b) < 0
+	})
+	return nil
 }
 
 type chaincodePolicy struct {

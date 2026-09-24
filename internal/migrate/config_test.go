@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,7 +16,10 @@ import (
 	pb "github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	lb "github.com/hyperledger/fabric-protos-go-apiv2/peer/lifecycle"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
+	"github.com/hyperledger/fabric-x-common/common/cauthdsl"
+	"github.com/hyperledger/fabric-x-common/common/policies"
 	"github.com/hyperledger/fabric-x-common/common/policydsl"
+	"github.com/hyperledger/fabric-x-common/msp"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
@@ -120,10 +124,10 @@ func TestLegacyChaincodePolicy(t *testing.T) {
 	require.True(t, proto.Equal(policy, definitions["basic"].application.GetSignaturePolicy()))
 }
 
-func TestCanonicalPolicyPreservesThresholdAndIgnoresOrdering(t *testing.T) {
-	a, b := &mb.MSPPrincipal{Principal: []byte("A")}, &mb.MSPPrincipal{Principal: []byte("B")}
+func TestCanonicalPolicyPreservesThresholdAndNormalizesPrincipalIndexes(t *testing.T) {
+	a, b := rolePrincipal(t, "Org1MSP", mb.MSPRole_PEER), rolePrincipal(t, "Org2MSP", mb.MSPRole_PEER)
 	first := &cb.SignaturePolicyEnvelope{Identities: []*mb.MSPPrincipal{a, b}, Rule: nOutOf(2, signedBy(0), signedBy(1))}
-	second := &cb.SignaturePolicyEnvelope{Identities: []*mb.MSPPrincipal{b, a}, Rule: nOutOf(2, signedBy(0), signedBy(1))}
+	second := &cb.SignaturePolicyEnvelope{Identities: []*mb.MSPPrincipal{b, a}, Rule: nOutOf(2, signedBy(1), signedBy(0))}
 	x, err := canonicalPolicy(first)
 	require.NoError(t, err)
 	y, err := canonicalPolicy(second)
@@ -133,6 +137,145 @@ func TestCanonicalPolicyPreservesThresholdAndIgnoresOrdering(t *testing.T) {
 	y, err = canonicalPolicy(second)
 	require.NoError(t, err)
 	require.NotEqual(t, x, y)
+}
+
+func TestCanonicalPolicyPreservesEvaluation(t *testing.T) {
+	principals := []*mb.MSPPrincipal{
+		rolePrincipal(t, "Org1MSP", mb.MSPRole_PEER),
+		rolePrincipal(t, "Org1MSP", mb.MSPRole_MEMBER),
+		rolePrincipal(t, "Org2MSP", mb.MSPRole_PEER),
+	}
+	peer := policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}
+	client := policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT}
+	other := policyIdentity{mspID: "Org2MSP", role: mb.MSPRole_PEER}
+	for _, tc := range []struct {
+		name string
+		rule *cb.SignaturePolicy
+		ids  []msp.Identity
+		want bool
+	}{
+		{"when roles overlap it preserves accepted endorsements", nOutOf(2, signedBy(0), signedBy(1)), []msp.Identity{peer, client}, true},
+		{"when roles overlap it preserves rejected endorsements", nOutOf(2, signedBy(1), signedBy(0)), []msp.Identity{peer, client}, false},
+		{"when roles overlap it preserves reversed identity order", nOutOf(2, signedBy(1), signedBy(0)), []msp.Identity{client, peer}, true},
+		{"when nested branches overlap it preserves their order", nOutOf(2, nOutOf(1, signedBy(0)), signedBy(1)), []msp.Identity{peer, client}, true},
+		{"when nested rules overlap it preserves their order", nOutOf(2, signedBy(2), nOutOf(2, signedBy(0), signedBy(1))), []msp.Identity{peer, client, other}, true},
+		{"when endorsements are insufficient it keeps rejecting", nOutOf(2, signedBy(0), signedBy(1)), []msp.Identity{peer}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := &cb.SignaturePolicyEnvelope{Identities: principals, Rule: tc.rule}
+			before := proto.Clone(original)
+			provider := cauthdsl.NewPolicyProvider(nil)
+			source, _, err := provider.NewPolicy(marshal(t, original))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, source.EvaluateIdentities(tc.ids) == nil)
+
+			converted, err := canonicalPolicy(original)
+			require.NoError(t, err)
+			target, _, err := provider.NewPolicy(converted)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, target.EvaluateIdentities(tc.ids) == nil)
+			require.True(t, proto.Equal(before, original))
+		})
+	}
+}
+
+func TestImplicitMetaConversion(t *testing.T) {
+	provider := cauthdsl.NewPolicyProvider(nil)
+	makePolicy := func(mspID string) policies.Policy {
+		p, _, err := provider.NewPolicy(marshal(t, &cb.SignaturePolicyEnvelope{
+			Identities: []*mb.MSPPrincipal{rolePrincipal(t, mspID, mb.MSPRole_PEER), rolePrincipal(t, mspID, mb.MSPRole_MEMBER)},
+			Rule:       nOutOf(2, signedBy(0), signedBy(1)),
+		}))
+		require.NoError(t, err)
+		return p
+	}
+	convert := func(source *policies.ImplicitMetaPolicy) ([]byte, error) {
+		signature, err := source.Convert()
+		require.NoError(t, err)
+		data, err := canonicalPolicy(signature)
+		require.NoError(t, err)
+		require.NoError(t, proto.Unmarshal(data, signature))
+		if err := normalizeImplicitMeta(source, signature.Rule, signature.Identities); err != nil {
+			return nil, err
+		}
+		return marshal(t, signature), nil
+	}
+	a, b := makePolicy("Org1MSP"), makePolicy("Org2MSP")
+	t.Run("when map order changes it produces the same policy without changing nested rules", func(t *testing.T) {
+		first := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{a, b}}
+		second := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{b, a}}
+		x, err := convert(first)
+		require.NoError(t, err)
+		y, err := convert(second)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+		ids := []msp.Identity{
+			policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT},
+			policyIdentity{mspID: "Org2MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org2MSP", role: mb.MSPRole_CLIENT},
+		}
+		target, _, err := provider.NewPolicy(x)
+		require.NoError(t, err)
+		require.NoError(t, first.EvaluateIdentities(ids))
+		require.NoError(t, target.EvaluateIdentities(ids))
+		require.Error(t, first.EvaluateIdentities(ids[:3]))
+		require.Error(t, target.EvaluateIdentities(ids[:3]))
+	})
+	t.Run("when implicit-meta policies are nested it normalizes each boundary", func(t *testing.T) {
+		c := makePolicy("Org3MSP")
+		first := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{
+			&policies.ImplicitMetaPolicy{Threshold: 1, SubPolicies: []policies.Policy{a, b}}, c,
+		}}
+		second := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{
+			c, &policies.ImplicitMetaPolicy{Threshold: 1, SubPolicies: []policies.Policy{b, a}},
+		}}
+		x, err := convert(first)
+		require.NoError(t, err)
+		y, err := convert(second)
+		require.NoError(t, err)
+		require.Equal(t, x, y)
+		ids := []msp.Identity{
+			policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT},
+			policyIdentity{mspID: "Org3MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org3MSP", role: mb.MSPRole_CLIENT},
+		}
+		target, _, err := provider.NewPolicy(x)
+		require.NoError(t, err)
+		require.NoError(t, first.EvaluateIdentities(ids))
+		require.NoError(t, target.EvaluateIdentities(ids))
+		require.Error(t, first.EvaluateIdentities(ids[:3]))
+		require.Error(t, target.EvaluateIdentities(ids[:3]))
+	})
+	t.Run("when subpolicies reuse identities it rejects conversion", func(t *testing.T) {
+		source := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{a, a}}
+		require.NoError(t, source.EvaluateIdentities([]msp.Identity{
+			policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT},
+		}))
+		_, err := convert(source)
+		require.ErrorContains(t, err, "overlapping or unsupported principals")
+	})
+}
+
+func rolePrincipal(t *testing.T, mspID string, role mb.MSPRole_MSPRoleType) *mb.MSPPrincipal {
+	t.Helper()
+	return &mb.MSPPrincipal{PrincipalClassification: mb.MSPPrincipal_ROLE, Principal: marshal(t, &mb.MSPRole{MspIdentifier: mspID, Role: role})}
+}
+
+// EvaluateIdentities only calls SatisfiesPrincipal. Signature verification is
+// covered separately by the runtime tests with real source MSP certificates.
+type policyIdentity struct {
+	msp.Identity
+	mspID string
+	role  mb.MSPRole_MSPRoleType
+}
+
+func (id policyIdentity) SatisfiesPrincipal(principal *mb.MSPPrincipal) error {
+	role := new(mb.MSPRole)
+	if err := proto.Unmarshal(principal.Principal, role); err != nil {
+		return err
+	}
+	if role.MspIdentifier == id.mspID && (role.Role == mb.MSPRole_MEMBER || role.Role == id.role) {
+		return nil
+	}
+	return errors.New("identity does not satisfy principal")
 }
 
 func signedBy(index int32) *cb.SignaturePolicy {

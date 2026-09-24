@@ -153,6 +153,20 @@ conflicting namespace policies, and key-level metadata it cannot preserve.
 Unmapped application state and lifecycle state are not copied into application
 tables.
 
+For modern chaincode, the tool reads the committed `_lifecycle` definition's
+`ValidationInfo` and `Collections` fields from the snapshot. For legacy chaincode,
+it reads the `lscc` definition. An explicit signature policy retains its rule
+order. A channel-policy reference is resolved against that source channel's
+configuration, before channels are consolidated.
+
+Fabric builds implicit-meta policies by iterating over a map of organization
+subpolicies. The tool makes only that ordering deterministic. It preserves the
+ordered rules inside each signature policy, because Fabric consumes matching
+identities in order. Implicit-meta subpolicies that can reuse an identity across
+branches are rejected: converting them into one signature policy would change
+how endorsements are counted. The conversion currently requires role principals
+from distinct MSPs across those branches.
+
 After preflight validation, the tool creates missing namespace tables and their
 normal committer functions, writes MSP configuration and namespace policies, and
 inserts bounded batches in one serializable transaction. It uses the normal
