@@ -160,12 +160,37 @@ order. A channel-policy reference is resolved against that source channel's
 configuration, before channels are consolidated.
 
 Fabric builds implicit-meta policies by iterating over a map of organization
-subpolicies. The tool makes only that ordering deterministic. It preserves the
-ordered rules inside each signature policy, because Fabric consumes matching
-identities in order. Implicit-meta subpolicies that can reuse an identity across
-branches are rejected: converting them into one signature policy would change
-how endorsements are counted. The conversion currently requires role principals
-from distinct MSPs across those branches.
+subpolicies. Each subpolicy independently evaluates the full endorsement set, so
+the same endorsement can satisfy more than one subpolicy. The importer can
+therefore merge these overlapping branches without changing which endorsements
+are accepted:
+
+| Implicit-meta policy | Equivalent policy |
+| --- | --- |
+| `ALL(P, P)` | `P` |
+| `ANY(P, P)` | `P` |
+| `ALL(Org1.peer, Org1.member)` | `Org1.peer` |
+
+Here, `P` is the same complete policy, including its ordered rules and
+principals. Evaluating it twice against the same endorsements produces the same
+result. A peer also satisfies the member requirement in the same MSP, so that
+member branch adds no requirement under implicit `ALL`.
+
+The importer applies these rewrites recursively at implicit-meta boundaries.
+It removes duplicate branches under `ALL` and `ANY`, adjusts `ALL` to require
+every remaining branch, and removes a single-member branch under `ALL` when a
+single-peer branch from the same MSP is present. If one branch remains, it
+replaces the implicit-meta rule. The importer then makes the order of remaining
+independent branches deterministic. Multiple remaining branches must use role
+principals from distinct MSPs, or conversion is rejected before database writes.
+
+These rewrites never simplify explicit signature policies. Fabric consumes
+identities in rule order inside those policies. Explicit
+`AND(Org1.peer, Org1.member)` still requires two identities and retains its rule
+order. Thresholds between `ANY` and `ALL` are not deduplicated: implicit
+`2-of(P, P, Q)` counts two successful branches when `P` succeeds, while
+`2-of(P, Q)` requires both policies. Overlaps outside the supported rewrites
+remain unsupported, even when another equivalent policy might exist.
 
 After preflight validation, the tool creates missing namespace tables and their
 normal committer functions, writes MSP configuration and namespace policies, and

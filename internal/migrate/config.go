@@ -312,8 +312,9 @@ func normalizeImplicitMeta(source policies.Policy, rule *cb.SignaturePolicy, ide
 	if !ok {
 		return nil
 	}
-	rules := rule.GetNOutOf().GetRules()
-	if len(rules) != len(implicit.SubPolicies) {
+	threshold := rule.GetNOutOf()
+	rules := threshold.GetRules()
+	if threshold == nil || len(rules) != len(implicit.SubPolicies) {
 		return errors.New("implicit-meta conversion changed the number of subpolicies")
 	}
 	for i, child := range implicit.SubPolicies {
@@ -321,11 +322,39 @@ func normalizeImplicitMeta(source policies.Policy, rule *cb.SignaturePolicy, ide
 			return err
 		}
 	}
+	// Implicit-meta branches each evaluate the full identity set. Repeated
+	// branches therefore have the same result, and a peer also satisfies a
+	// member branch in the same MSP. Explicit signature rules cannot use these
+	// rewrites because they consume identities as they evaluate each branch.
+	all := int(threshold.N) == len(rules)
+	if all || threshold.N == 1 {
+		var merged []*cb.SignaturePolicy
+		for i, candidate := range rules {
+			redundant := false
+			for j, other := range rules {
+				if (j < i && proto.Equal(candidate, other)) || (all && peerImpliesMember(other, candidate, identities)) {
+					redundant = true
+					break
+				}
+			}
+			if !redundant {
+				merged = append(merged, candidate)
+			}
+		}
+		rules, threshold.Rules = merged, merged
+		if all {
+			threshold.N = int32(len(rules))
+		}
+		if len(rules) == 1 {
+			rule.Type = rules[0].Type
+			return nil
+		}
+	}
 	// Upstream gathers implicit-meta subpolicies from a Go map. Sort only this
-	// boundary. Each source subpolicy gets its own identity budget, whereas the
-	// converted signature policy shares one, so overlapping MSPs are unsafe.
+	// boundary after merging. Disjoint MSPs ensure the remaining branches do
+	// not compete for identities when evaluated as one signature policy.
 	if !independentRules(rules, identities) {
-		return errors.New("implicit-meta subpolicies with overlapping or unsupported principals cannot be preserved")
+		return errors.New("implicit-meta subpolicies still have overlapping or unsupported principals after supported simplifications")
 	}
 	sort.SliceStable(rules, func(i, j int) bool {
 		a, _ := proto.Marshal(rules[i])
@@ -333,6 +362,28 @@ func normalizeImplicitMeta(source policies.Policy, rule *cb.SignaturePolicy, ide
 		return bytes.Compare(a, b) < 0
 	})
 	return nil
+}
+
+func peerImpliesMember(peer, member *cb.SignaturePolicy, identities []*mb.MSPPrincipal) bool {
+	p, m := singlePolicyRole(peer, identities), singlePolicyRole(member, identities)
+	return p != nil && m != nil && p.MspIdentifier != "" && p.MspIdentifier == m.MspIdentifier &&
+		p.Role == mb.MSPRole_PEER && m.Role == mb.MSPRole_MEMBER
+}
+
+func singlePolicyRole(rule *cb.SignaturePolicy, identities []*mb.MSPPrincipal) *mb.MSPRole {
+	// Fabric's single-signer policies can wrap the leaf in a 1-of-1 rule.
+	for threshold := rule.GetNOutOf(); threshold != nil; threshold = rule.GetNOutOf() {
+		if threshold.N != 1 || len(threshold.Rules) != 1 {
+			return nil
+		}
+		rule = threshold.Rules[0]
+	}
+	principal := identities[rule.GetSignedBy()]
+	role := new(mb.MSPRole)
+	if principal.PrincipalClassification != mb.MSPPrincipal_ROLE || proto.Unmarshal(principal.Principal, role) != nil {
+		return nil
+	}
+	return role
 }
 
 type chaincodePolicy struct {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	cb "github.com/hyperledger/fabric-protos-go-apiv2/common"
@@ -160,6 +161,7 @@ func TestCanonicalPolicyPreservesEvaluation(t *testing.T) {
 		{"when nested branches overlap it preserves their order", nOutOf(2, nOutOf(1, signedBy(0)), signedBy(1)), []msp.Identity{peer, client}, true},
 		{"when nested rules overlap it preserves their order", nOutOf(2, signedBy(2), nOutOf(2, signedBy(0), signedBy(1))), []msp.Identity{peer, client, other}, true},
 		{"when endorsements are insufficient it keeps rejecting", nOutOf(2, signedBy(0), signedBy(1)), []msp.Identity{peer}, false},
+		{"when explicit rules repeat they still need separate identities", nOutOf(2, signedBy(0), signedBy(0)), []msp.Identity{peer}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			original := &cb.SignaturePolicyEnvelope{Identities: principals, Rule: tc.rule}
@@ -244,14 +246,76 @@ func TestImplicitMetaConversion(t *testing.T) {
 		require.Error(t, first.EvaluateIdentities(ids[:3]))
 		require.Error(t, target.EvaluateIdentities(ids[:3]))
 	})
-	t.Run("when subpolicies reuse identities it rejects conversion", func(t *testing.T) {
-		source := &policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{a, a}}
-		require.NoError(t, source.EvaluateIdentities([]msp.Identity{
-			policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}, policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT},
+	makeRolePolicy := func(mspID string, role mb.MSPRole_MSPRoleType) policies.Policy {
+		p, _, err := provider.NewPolicy(marshal(t, &cb.SignaturePolicyEnvelope{
+			Identities: []*mb.MSPPrincipal{rolePrincipal(t, mspID, role)},
+			Rule:       nOutOf(1, signedBy(0)),
 		}))
-		_, err := convert(source)
-		require.ErrorContains(t, err, "overlapping or unsupported principals")
-	})
+		require.NoError(t, err)
+		return p
+	}
+	peerPolicy := makeRolePolicy("Org1MSP", mb.MSPRole_PEER)
+	memberPolicy := makeRolePolicy("Org1MSP", mb.MSPRole_MEMBER)
+	otherPolicy := makeRolePolicy("Org2MSP", mb.MSPRole_MEMBER)
+	peer := policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_PEER}
+	client := policyIdentity{mspID: "Org1MSP", role: mb.MSPRole_CLIENT}
+	other := policyIdentity{mspID: "Org2MSP", role: mb.MSPRole_PEER}
+	for _, tc := range []struct {
+		name      string
+		threshold int
+		branches  []policies.Policy
+	}{
+		{"ALL of identical policies", 2, []policies.Policy{a, a}},
+		{"ANY of identical policies", 1, []policies.Policy{a, a}},
+		{"ALL of a peer and member in the same MSP", 2, []policies.Policy{peerPolicy, memberPolicy}},
+		{"ALL adjusts its threshold after removing duplicates", 3, []policies.Policy{a, a, otherPolicy}},
+		{"ANY keeps its threshold after removing duplicates", 1, []policies.Policy{a, a, otherPolicy}},
+		{"ALL keeps independent branches after merging roles", 3, []policies.Policy{peerPolicy, memberPolicy, otherPolicy}},
+		{"ALL keeps roles from different MSPs", 2, []policies.Policy{peerPolicy, otherPolicy}},
+		{"nested implicit-meta branches merge recursively", 2, []policies.Policy{
+			&policies.ImplicitMetaPolicy{Threshold: 2, SubPolicies: []policies.Policy{memberPolicy, peerPolicy}}, otherPolicy,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &policies.ImplicitMetaPolicy{Threshold: tc.threshold, SubPolicies: tc.branches}
+			before, err := source.Convert()
+			require.NoError(t, err)
+			converted, err := convert(source)
+			require.NoError(t, err)
+			target, _, err := provider.NewPolicy(converted)
+			require.NoError(t, err)
+			for _, ids := range [][]msp.Identity{
+				nil, {peer}, {client}, {other}, {peer, client}, {client, peer},
+				{peer, other}, {client, other}, {peer, client, other}, {other, client, peer},
+			} {
+				require.Equal(t, source.EvaluateIdentities(ids) == nil, target.EvaluateIdentities(ids) == nil, "identities: %v", ids)
+			}
+			after, err := source.Convert()
+			require.NoError(t, err)
+			require.True(t, proto.Equal(before, after), "conversion must not change source subpolicies")
+			reversed := slices.Clone(tc.branches)
+			slices.Reverse(reversed)
+			reordered, err := convert(&policies.ImplicitMetaPolicy{Threshold: tc.threshold, SubPolicies: reversed})
+			require.NoError(t, err)
+			require.Equal(t, converted, reordered, "map order must not affect the merged policy")
+		})
+	}
+	for _, tc := range []struct {
+		name      string
+		threshold int
+		branches  []policies.Policy
+		ids       []msp.Identity
+	}{
+		{"remaining complex overlap", 2, []policies.Policy{a, memberPolicy}, []msp.Identity{peer, client}},
+		{"duplicates in a general threshold", 2, []policies.Policy{a, a, otherPolicy}, []msp.Identity{peer, client}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &policies.ImplicitMetaPolicy{Threshold: tc.threshold, SubPolicies: tc.branches}
+			require.NoError(t, source.EvaluateIdentities(tc.ids))
+			_, err := convert(source)
+			require.ErrorContains(t, err, "after supported simplifications")
+		})
+	}
 }
 
 func rolePrincipal(t *testing.T, mspID string, role mb.MSPRole_MSPRoleType) *mb.MSPPrincipal {
