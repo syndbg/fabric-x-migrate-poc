@@ -290,19 +290,19 @@ func ensureFabricRelease(t *testing.T, destination, version string) {
 	asset := fmt.Sprintf("hyperledger-fabric-%s-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH, version)
 	response, err := (&http.Client{Timeout: 5 * time.Minute}).Get("https://github.com/hyperledger/fabric/releases/download/v" + version + "/" + asset)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { require.NoError(t, response.Body.Close()) }()
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	require.NoError(t, extractFabricRelease(temporary, response.Body))
 	require.NoError(t, os.RemoveAll(destination))
 	require.NoError(t, os.Rename(temporary, destination))
 }
 
-func extractFabricRelease(destination string, source io.Reader) error {
+func extractFabricRelease(destination string, source io.Reader) (returnErr error) {
 	gzipReader, err := gzip.NewReader(source)
 	if err != nil {
 		return err
 	}
-	defer gzipReader.Close()
+	defer func() { returnErr = errors.Join(returnErr, gzipReader.Close()) }()
 	archive := tar.NewReader(gzipReader)
 	for {
 		header, err := archive.Next()

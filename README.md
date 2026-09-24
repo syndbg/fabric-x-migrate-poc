@@ -243,3 +243,38 @@ This starts and removes a disposable Fabric network. It reuses the pinned
 `fabric-samples` checkout and includes a small test contract that writes one
 public value and one value in a private collection per channel. The startup
 checks are part of this suite; there is no separate runtime opt-in flag.
+
+## Deployment and recovery acceptance
+
+`TestDeployment` uses the pinned Fabric-X Arma orderer (`v1.0.1`), with four
+parties and one shard. Two organizations run independent committer service sets,
+use different MSP identities for block delivery, and import into separate
+databases. The test imports public state and separate hash namespaces from two
+real Classic channels, then checks reads, authorized writes, and rejected writes
+on both organizations.
+
+After target writes, the test stops one organization's services and backs up its
+database and sidecar ledger. It uses PostgreSQL's `pg_dump`/`psql` or YugabyteDB's
+`ysql_dump`/`ysqlsh` inside the configured database container. While that
+organization is stopped, the other commits more writes. The test restores into
+a fresh database, starts services from the saved ledger, checks catch-up from
+Arma, and submits another write to both organizations. Assertions cover exact
+keys, values, versions, private-key exclusion, and transaction status.
+
+Run both database backends with their existing disposable containers:
+
+```sh
+make acceptance-binaries
+FABRIC_X_MIGRATION_TEST_DEPLOYMENT=1 \
+FABRIC_X_MIGRATION_TEST_DATABASE_URL='postgres://postgres@localhost:25432/postgres?sslmode=disable' \
+FABRIC_X_MIGRATION_TEST_YUGABYTE_DATABASE_URL='postgres://yugabyte@localhost:25433/yugabyte?sslmode=disable' \
+FABRIC_X_MIGRATION_TEST_POSTGRES_CONTAINER=migration-matrix-postgres \
+FABRIC_X_MIGRATION_TEST_YUGABYTE_CONTAINER=migration-matrix-yugabyte \
+go test -tags=integration ./internal/migrate -run '^TestDeployment$' -count=1 -timeout=20m -v
+```
+
+The existing CI integration job runs this scenario against both database
+services alongside the full snapshot matrix. The Arma deployment uses real BFT
+consensus and internal TLS. External orderer and committer connections use
+localhost without TLS. This test does not cover production certificate rotation,
+consensus fault injection, or recovery without the saved sidecar ledger.

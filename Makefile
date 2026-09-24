@@ -5,6 +5,7 @@ STATE_DATABASE ?= goleveldb
 CHANNEL ?= migration
 FABRIC_SAMPLES_COMMIT := $(shell cat fabric-samples.commit)
 GOLANGCI_LINT_VERSION ?= v2.4.0
+FABRIC_X_ORDERER_VERSION := v1.0.1
 
 HACK_DIR := $(CURDIR)/hack
 FABRIC_SAMPLES := $(HACK_DIR)/fabric-samples
@@ -22,12 +23,13 @@ PEER_MSP := $(HACK_DIR)/crypto/peerOrganizations/org1.example.com/users/Admin@or
 ORDERER_ADMIN_ARGS := -o localhost:18053 --ca-file $(ORDERER_CA) --client-cert $(ORDERER_CERT) --client-key $(ORDERER_KEY)
 PEER_ENV := FABRIC_CFG_PATH=$(FABRIC_CONFIG) CORE_PEER_TLS_ENABLED=true CORE_PEER_LOCALMSPID=Org1MSP CORE_PEER_MSPCONFIGPATH=$(PEER_MSP) CORE_PEER_ADDRESS=localhost:18051 CORE_PEER_TLS_ROOTCERT_FILE=$(PEER_CA)
 
-.PHONY: help build runtime-binaries test test-integration lint lint-fix hack-samples hack-fabric run-hack stop-hack hack-status
+.PHONY: help build runtime-binaries acceptance-binaries test test-integration lint lint-fix hack-samples hack-fabric run-hack stop-hack hack-status
 
 help:
 	@printf '%s\n' \
 		'build             build artifacts/bin/fabric-x-migrate' \
 		'runtime-binaries  build upstream committer and mock orderer for startup tests' \
+		'acceptance-binaries build pinned Arma tools for deployment and recovery tests' \
 		'test              run unit tests' \
 		'test-integration  run Fabric and direct-import integration tests' \
 		'lint              run golangci-lint' \
@@ -46,6 +48,12 @@ runtime-binaries:
 	@mkdir -p artifacts/runtime/bin
 	go build -o artifacts/runtime/bin/committer github.com/hyperledger/fabric-x-committer/cmd/committer
 	go build -o artifacts/runtime/bin/mock github.com/hyperledger/fabric-x-committer/cmd/mock
+
+acceptance-binaries: build runtime-binaries
+	GOBIN=$(CURDIR)/artifacts/runtime/bin go install github.com/hyperledger/fabric-x-orderer/cmd/arma@$(FABRIC_X_ORDERER_VERSION)
+	GOBIN=$(CURDIR)/artifacts/runtime/bin go install github.com/hyperledger/fabric-x-orderer/cmd/armageddon@$(FABRIC_X_ORDERER_VERSION)
+	@mkdir -p artifacts/runtime/orderer-sampleconfig
+	cp -R "$$(go list -m -f '{{.Dir}}' github.com/hyperledger/fabric-x-orderer@$(FABRIC_X_ORDERER_VERSION))/testutil/fabric/sampleconfig/." artifacts/runtime/orderer-sampleconfig/
 
 test:
 	go test ./... -v
